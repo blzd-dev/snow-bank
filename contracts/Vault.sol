@@ -2,19 +2,18 @@
 pragma solidity 0.6.12;
 
 import './interfaces/IVault.sol';
-import './external/alpaca/IVaultAlpaca.sol';
+import './interfaces/IVaultAlpaca.sol';
 import '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import '@openzeppelin/contracts/token/ERC20/SafeERC20.sol';
 import '@openzeppelin/contracts/math/SafeMath.sol';
 import '@openzeppelin/contracts/utils/ReentrancyGuard.sol';
+import "@openzeppelin/contracts/access/Ownable.sol";
 
-contract Vault is IVault, ReentrancyGuard {
+contract Vault is IVault, Ownable ,ReentrancyGuard {
   using SafeMath for uint256;
   using SafeERC20 for IERC20;
 
-  event FundMigration(uint256 value);
-
-  /// @notice mUSD address.
+  /// @notice BUSD address.
   address public override reserve;
 
   /// @notice address of Alpaca Vault contract.
@@ -23,17 +22,28 @@ contract Vault is IVault, ReentrancyGuard {
   /// @notice Balance tracker of accounts who have deposited funds.
   mapping(address => uint256) balance;
 
+  /// @notice Is SnowBank
+  mapping(address => bool) snowBank;
+
+  event AddSnowBank(address indexed snowBank);
+  event RemoveSnowBank(address indexed snowBank);
+
   constructor(address _reserve, address _alpacaVaultAddress) public {
     reserve = _reserve;
     alpacaVaultAddress = _alpacaVaultAddress;
     _approveMax(reserve, _alpacaVaultAddress);
   }
 
+  modifier onlySnowBank() {
+      require(snowBank[msg.sender] , "Caller is not SnowBank Contract");
+      _;
+  }
+
   /// @notice Deposits reserve into savingsAccount.
   /// @dev It is part of Vault's interface.
   /// @param amount Value to be deposited.
   /// @return True if successful.
-  function deposit(uint256 amount) external override returns (bool) {
+  function deposit(uint256 amount) external override onlySnowBank returns (bool) {
     require(amount > 0, 'Amount must be greater than 0');
 
     IERC20(reserve).safeTransferFrom(msg.sender, address(this), amount);
@@ -48,7 +58,7 @@ contract Vault is IVault, ReentrancyGuard {
   /// @dev It is part of Vault's interface.
   /// @param amount Value to be redeemed.
   /// @return True if successful.
-  function redeem(uint256 amount) external override nonReentrant returns (bool) {
+  function redeem(uint256 amount) external override nonReentrant onlySnowBank returns (bool) {
     require(amount > 0, 'Amount must be greater than 0');
     require(amount <= balance[msg.sender], 'Not enough funds');
 
@@ -63,9 +73,8 @@ contract Vault is IVault, ReentrancyGuard {
   /// @dev It is part of Vault's interface.
   /// @return _balance Reserve amount in the savings contract.
   function getBalance() public override view returns (uint256 _balance) {
-    IVaultAlpaca bank = IVaultAlpaca(alpacaVaultAddress);
-    IERC20 token = IERC20(bank.token());
-    _balance = token.balanceOf(address(this)).mul(bank.totalToken()).div(token.totalSupply());
+    IVaultAlpaca IAlpaca = IVaultAlpaca(alpacaVaultAddress);
+    _balance = IAlpaca.balanceOf(address(this)).mul(IAlpaca.totalToken()).div(IAlpaca.totalSupply());
   }
 
   function _approveMax(address token, address spender) internal {
@@ -87,10 +96,24 @@ contract Vault is IVault, ReentrancyGuard {
   // @param _account The account to redeem to.
   // @param _amount The amount to redeem.
   function _redeemFromSavings(address _account, uint256 _amount) internal {
-    uint256 before = getBalance();
-    IVaultAlpaca(alpacaVaultAddress).withdraw(_amount);
-    uint256 amountIBUSD = getBalance().sub(before);
 
-    IERC20(reserve).safeTransfer(_account, amountIBUSD);
+    IVaultAlpaca IAlpaca = IVaultAlpaca(alpacaVaultAddress);
+    
+    uint256 shareAmount = _amount.mul(IAlpaca.totalSupply()).div(IAlpaca.totalToken());
+    
+    IVaultAlpaca(alpacaVaultAddress).withdraw(shareAmount);
+    
+    IERC20(reserve).safeTransfer(_account, IERC20(reserve).balanceOf(address(this)));
   }
+
+ function addSnowBank(address _snowBank) public onlyOwner {
+    snowBank[_snowBank] = true;
+    emit AddSnowBank(_snowBank);
+  }
+
+  function removeSnowBank(address _snowBank) public onlyOwner {
+    snowBank[_snowBank] = false;
+    emit RemoveSnowBank(_snowBank);
+  }
+
 }

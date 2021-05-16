@@ -21,8 +21,10 @@ contract SnowBank is ISnowBank, Ownable, ReentrancyGuard {
     event TokensSold(address indexed from, uint256 tokensSold, uint256 amountReceived);
     event MintAndBurn(uint256 reserveAmount, uint256 tokensBurned);
     event InterestClaimed(address indexed from, uint256 initerestAmount);
+    event AddSnowBankVault(address indexed snowVaults);
+    event RemoveSnowBankVault(address indexed snowVault);
 
-    /// @notice A 10% tax is applied to every purchase or sale of tokens.
+    /// @notice A 3% tax is applied to every purchase or sale of tokens.
     uint256 public constant override TAX = 3;
 
     /// @notice The slope of the bonding curve.
@@ -30,10 +32,10 @@ contract SnowBank is ISnowBank, Ownable, ReentrancyGuard {
 
     /// @notice Address in which tokens are sent to be burned.
     /// @dev These tokens can't be redeemed by the reserve.
-    address constant BURN_ADDRESS = 0x000000000000000000000000000000000000dEaD;
+    address private constant BURN_ADDRESS = 0x000000000000000000000000000000000000dEaD;
 
     /// @notice GaleToken token instance.
-    GaleToken public token;
+    GaleToken public immutable token;
 
     /// @notice Total interests earned since the contract deployment.
     uint256 public override totalInterestClaimed;
@@ -43,13 +45,13 @@ contract SnowBank is ISnowBank, Ownable, ReentrancyGuard {
     uint256 public override totalReserve;
 
     /// @notice BUSD reserve instance.
-    address public override reserve;
+    address public immutable override reserve;
 
     /// @notice Interface for integration with lending platform.
-    address public override vault;
+    address public immutable override vault;
 
     mapping (address => bool) public snowBankVault;
-    
+
     modifier onlySnowBankVault() {
         require(snowBankVault[msg.sender] , "Caller is not SnowBankVault contract");
         _;
@@ -57,9 +59,10 @@ contract SnowBank is ISnowBank, Ownable, ReentrancyGuard {
   
     constructor(address _vault) public {
       vault = _vault;
-      reserve = IVault(vault).reserve();
+      address _reserve = IVault(_vault).reserve();
       token = new GaleToken(address(this));
-      _approveMax(reserve, vault);
+      reserve = _reserve;
+      _approveMax(_reserve, _vault);
     }
 
     /// @notice gale address
@@ -140,14 +143,14 @@ contract SnowBank is ISnowBank, Ownable, ReentrancyGuard {
       return getTotalSupply().roundedDiv(DIVIDER);
     }
 
-    /// @notice Calculates the amount of tokens in exchange for reserve after applying the 10% tax.
+    /// @notice Calculates the amount of tokens in exchange for reserve after applying the 3% tax.
     /// @param reserveAmount Reserve value in wei to use in the conversion.
-    /// @return Token amount in wei after the 10% tax has been applied.
+    /// @return Token amount in wei after the 3% tax has been applied.
     function getReserveToTokensTaxed(uint256 reserveAmount) external override view returns (uint256) {
       if (reserveAmount == 0) {
         return 0;
       }
-      uint256 fee = reserveAmount.div(TAX);
+      uint256 fee = reserveAmount.mul(TAX).div(100);
       uint256 totalTokens = getReserveToTokens(reserveAmount);
       uint256 taxedTokens = getReserveToTokens(fee);
       return totalTokens.sub(taxedTokens);
@@ -155,13 +158,13 @@ contract SnowBank is ISnowBank, Ownable, ReentrancyGuard {
 
     /// @notice Calculates the amount of reserve in exchange for tokens after applying the 10% tax.
     /// @param tokenAmount Token value in wei to use in the conversion.
-    /// @return Reserve amount in wei after the 10% tax has been applied.
+    /// @return Reserve amount in wei after the 3% tax has been applied.
     function getTokensToReserveTaxed(uint256 tokenAmount) external override view returns (uint256) {
       if (tokenAmount == 0) {
         return 0;
       }
       uint256 reserveAmount = getTokensToReserve(tokenAmount);
-      uint256 fee = reserveAmount.div(TAX);
+      uint256 fee = reserveAmount.mul(TAX).div(100);
       return reserveAmount.sub(fee);
     }
 
@@ -180,12 +183,12 @@ contract SnowBank is ISnowBank, Ownable, ReentrancyGuard {
     }
 
     /// @notice Worker function that exchanges reserve to tokens.
-    /// Extracts 10% fee from the reserve supplied and exchanges the rest to tokens.
+    /// Extracts 3% fee from the reserve supplied and exchanges the rest to tokens.
     /// Total amount is then sent to the lending protocol so it can start earning interest.
     /// @dev User must approve the reserve to be spent before investing.
     /// @param _reserveAmount Total reserve value in wei to be exchanged to tokens.
     function _invest(uint256 _reserveAmount) internal nonReentrant {
-      uint256 fee = _reserveAmount.div(TAX);
+      uint256 fee = _reserveAmount.mul(TAX).div(100);
       require(fee >= 1, 'Transaction amount not sufficient to pay fee');
 
       uint256 totalTokens = getReserveToTokens(_reserveAmount);
@@ -221,7 +224,7 @@ contract SnowBank is ISnowBank, Ownable, ReentrancyGuard {
       require(_tokenAmount > 0, 'Must sell something');
 
       uint256 reserveAmount = getTokensToReserve(_tokenAmount);
-      uint256 fee = reserveAmount.div(TAX);
+      uint256 fee = reserveAmount.mul(TAX).div(100);
 
       require(fee >= 1, 'Must pay minimum fee');
 
@@ -241,7 +244,7 @@ contract SnowBank is ISnowBank, Ownable, ReentrancyGuard {
       token.mint(BURN_ADDRESS, taxedTokens);
 
       IVault(vault).redeem(totalClaim);
-      IERC20(reserve).safeTransfer(msg.sender, totalClaim);
+      IERC20(reserve).safeTransfer(msg.sender, IERC20(reserve).balanceOf(address(this)));
 
       emit TokensSold(msg.sender, _tokenAmount, net);
       emit MintAndBurn(fee, taxedTokens);
@@ -340,9 +343,11 @@ contract SnowBank is ISnowBank, Ownable, ReentrancyGuard {
 
     function addSnowBankVault(address _snowBankVault) public onlyOwner {
         snowBankVault[_snowBankVault] = true;
+        emit AddSnowBankVault(_snowBankVault);
     }
 
     function removeSnowBankVault(address _snowBankVault) public onlyOwner {
         snowBankVault[_snowBankVault] = false;
+        emit RemoveSnowBankVault(_snowBankVault);
     }
 }

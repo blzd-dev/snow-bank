@@ -2,7 +2,9 @@
 
 pragma solidity >=0.5.0 <0.7.0;
 
-interface IVaultAlpaca {
+import '@openzeppelin/contracts/token/ERC20/IERC20.sol';
+
+interface IVaultAlpaca is IERC20 {
 
   /// @dev Return the ERC20 address.
   function token() external view returns (address);

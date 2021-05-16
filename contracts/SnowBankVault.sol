@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.6.12;
 
+import './StakeBlzdToken.sol';
 import "@openzeppelin/contracts/math/Math.sol";
 import "@openzeppelin/contracts/math/SafeMath.sol";
 import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
@@ -13,12 +14,21 @@ import "./interfaces/IStakingRewards.sol";
 import "./interfaces/IPancakeRouter02.sol";
 import "./interfaces/IBank.sol";
 import "./interfaces/ISnowBank.sol";
+import "./interfaces/IYetiMaster.sol";
 
 contract SnowBankVault is IStakingRewards, Ownable , ReentrancyGuard {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
     /* ========== CONSTANTS ============= */
+
+    // team 1.5%
+    // each 0.75%
+    address private constant teamYetiA = 0xCe059E8af96a654d4afe630Fa325FBF70043Ab11;
+    address private constant teamYetiB = 0x1EE101AC64BcE7F6DD85C0Ad300C4BBC2cc8272B;
+
+    // 3% BUSD 
+    address private constant blizzardPool = 0x2Dcf7FB5F83594bBD13C781f5b8b2a9F55a4cdbb;
 
     address private constant CAKE = 0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82;
     IMasterChef private constant CAKE_MASTER_CHEF = IMasterChef(0x73feaa1eE314F8c655E354234017bE2193C9E24E);
@@ -32,12 +42,15 @@ contract SnowBankVault is IStakingRewards, Ownable , ReentrancyGuard {
 
     /* ========== STATE VARIABLES ========== */
 
-    IERC20 public stakingToken;
+    IERC20 public immutable stakingToken;
 
-    // Reward ID 0 IBNB 1 GALE
-    address public IBNB ;
-    address public GALE ;
-    address public snowBank;
+    // Reward ID 0 IBNB 1 GALE 3 xBLZD
+    address public immutable IBNB ;
+    address public immutable GALE ;
+    address public immutable snowBank;
+    StakeBlzdToken public immutable stakeBlzdToken;
+    address public immutable xBLZD;
+    IYetiMaster public immutable yetiMaster;
 
     mapping(uint256 => uint256) public rewardRate;
     mapping(uint256 => uint256) public rewardPerTokenStored;
@@ -47,9 +60,8 @@ contract SnowBankVault is IStakingRewards, Ownable , ReentrancyGuard {
     mapping(uint256 => uint256) public periodFinish;
 
     uint256 public pid;
-
-    address public distributionBusd;
-
+    uint256 public pidYeti;
+    bool public initYeti;
 
     mapping(uint256 => mapping(address => uint256)) public userRewardPerTokenPaid;
     mapping(uint256 => mapping(address => uint256)) public rewards;
@@ -60,15 +72,15 @@ contract SnowBankVault is IStakingRewards, Ownable , ReentrancyGuard {
 
     mapping(address => uint256) private _balances;
 
-    address public distributionBUSD;
+    bool public emergencyStop;
 
     /* ========== CONSTRUCTOR ========== */
 
     constructor(
         uint256 _pid,
-        address _distributionBUSD,
         address _IBNB,
-        address _snowBank
+        address _snowBank,
+        address _yetiMaster
     ) public {
         (address _stakingToken,,,) = CAKE_MASTER_CHEF.poolInfo(_pid);
 
@@ -80,16 +92,22 @@ contract SnowBankVault is IStakingRewards, Ownable , ReentrancyGuard {
 
         GALE = ISnowBank(_snowBank).gale();
 
+        xBLZD = IYetiMaster(_yetiMaster).xBLZD();
+
+        yetiMaster = IYetiMaster(_yetiMaster);
+
+        stakeBlzdToken = new StakeBlzdToken(address(this));
+
+        IERC20(_stakingToken).safeApprove(address(CAKE_MASTER_CHEF), uint256(-1));
+        
         stakingToken = IERC20(_stakingToken);
 
-        stakingToken.safeApprove(address(CAKE_MASTER_CHEF), uint256(-1));
         IERC20(CAKE).safeApprove(address(ROUTER), uint256(-1));
-        IERC20(BUSD).safeApprove(address(snowBank), uint256(-2));
-
-        distributionBUSD = _distributionBUSD;
+        IERC20(BUSD).safeApprove(address(_snowBank), uint256(-1));
 
         rewardsDuration[0] = 4 hours;
         rewardsDuration[1] = 4 hours;
+        rewardsDuration[2] = 4 hours;
     }
 
     /* ========== VIEWS ========== */
@@ -125,42 +143,70 @@ contract SnowBankVault is IStakingRewards, Ownable , ReentrancyGuard {
     }
 
     /* ========== MUTATIVE FUNCTIONS ========== */
-    function stake(uint256 amount) external override nonReentrant updateReward(msg.sender,0) updateReward(msg.sender,1) {
+    function stake(uint256 amount) external override nonReentrant updateReward(msg.sender,0) updateReward(msg.sender,1) updateReward(msg.sender,2) isNotEmergencyStop{
         require(amount > 0, "Cannot stake 0");
-        _totalSupply = _totalSupply.add(amount);
-        _balances[msg.sender] = _balances[msg.sender].add(amount);
         stakingToken.safeTransferFrom(msg.sender, address(this), amount);
-        CAKE_MASTER_CHEF.deposit(pid, amount);
+         // fee 0.1% go to blizzardPool
+        uint256 depositFee = amount.div(10000);
+        stakingToken.safeTransfer(blizzardPool, depositFee);
+        uint256 amounAfterFee =  amount.sub(depositFee);
+        _totalSupply = _totalSupply.add(amounAfterFee);
+        _balances[msg.sender] = _balances[msg.sender].add(amounAfterFee);
+        CAKE_MASTER_CHEF.deposit(pid, amounAfterFee);        
         emit Staked(msg.sender, amount);
     }
 
-    function withdraw(uint256 amount) public override nonReentrant updateReward(msg.sender,0) updateReward(msg.sender,1) {
+    function withdraw(uint256 amount) public override nonReentrant updateReward(msg.sender,0) updateReward(msg.sender,1) updateReward(msg.sender,2) {
         require(amount > 0, "Cannot withdraw 0");
         _totalSupply = _totalSupply.sub(amount);
         _balances[msg.sender] = _balances[msg.sender].sub(amount);
-        CAKE_MASTER_CHEF.withdraw(pid, amount);
+        if(emergencyStop != true){
+            CAKE_MASTER_CHEF.withdraw(pid, amount);
+        } 
         stakingToken.safeTransfer(msg.sender, amount);
         emit Withdrawn(msg.sender, amount);
     }
 
     function getReward(uint256 rewardId) public override nonReentrant updateReward(msg.sender,rewardId) {
-        require(rewardId <= 1 ,"wrong rewardId");
+        require(rewardId <= 2 ,"wrong rewardId");
         uint256 reward = rewards[rewardId][msg.sender];
         if (reward > 0) {
             rewards[rewardId][msg.sender] = 0;
-            IERC20 rewardsToken = rewardId == 0 ? IERC20(IBNB) : IERC20(GALE);
+            IERC20 rewardsToken;
+            if(rewardId  == 0){
+                rewardsToken = IERC20(IBNB);
+            } 
+            else if (rewardId == 1){
+                rewardsToken = IERC20(GALE);
+            }
+            else{
+                rewardsToken = IERC20(xBLZD);
+            }
             rewardsToken.safeTransfer(msg.sender, reward);
             emit RewardPaid(msg.sender, reward , rewardId);
         }
     }
 
-    function exit() external override {
-        withdraw(_balances[msg.sender]);
-        getReward(0);
-        getReward(1);
+    function exit(uint256 amount) external override {
+        withdraw(amount);
+        getAllReward();
     }
 
-    function harvest() public onlyRewardsDistribution {
+    function getAllReward() public override {
+        getReward(0);
+        getReward(1);
+        getReward(2);
+    }
+    
+    function initYetiPool(uint256 _pidYeti) public onlyOwner{
+        require(!initYeti,"Already Initiated");
+        IERC20(address(stakeBlzdToken)).safeApprove(address(yetiMaster), uint256(-1));
+        pidYeti = _pidYeti;
+        initYeti = true;
+        yetiMaster.deposit(pidYeti, 100e18);
+    }
+
+    function harvest() public onlyRewardsDistribution isNotEmergencyStop {
         CAKE_MASTER_CHEF.withdraw(pid, 0);
         _harvest();
     }
@@ -178,43 +224,78 @@ contract SnowBankVault is IStakingRewards, Ownable , ReentrancyGuard {
     function _harvest() private {
         uint256 cakeAmount = IERC20(CAKE).balanceOf(address(this));
 
-        uint256 cakeAmontForIBNB = cakeAmount.mul(70).div(100);
+        // 47.5% go to IBNB
+        uint256 cakeAmountForIBNB = cakeAmount.mul(475).div(1000);
 
-        ROUTER.swapExactTokensForETH(cakeAmontForIBNB, 0, cakeToBnbPath, address(this), now + 600);
+        ROUTER.swapExactTokensForETH(cakeAmountForIBNB, 0, cakeToBnbPath, address(this), now + 600);
 
-        uint256 _before = IBank(IBNB).balanceOf(address(this));
+        uint256 iBNBBefore = IBank(IBNB).balanceOf(address(this));
 
         IBank(IBNB).deposit{value:address(this).balance}();
 
-        uint256 amountIBNB = IBank(IBNB).balanceOf(address(this)).sub(_before);
+        uint256 amountIBNB = IBank(IBNB).balanceOf(address(this)).sub(iBNBBefore);
         // ADD IBNB Reward
         if (amountIBNB > 0) {
             _notifyRewardAmount(amountIBNB,0);
         }
 
-        uint256 cakeToBUSD = cakeAmount.sub(cakeAmontForIBNB);
+        // 52.5 swap to BUSD
+        uint256 cakeToBUSD = cakeAmount.sub(cakeAmountForIBNB);
 
         ROUTER.swapExactTokensForTokens(cakeToBUSD, 0, cakeToBusdPath, address(this), now + 600);
 
         uint256 amountBusd = IERC20(BUSD).balanceOf(address(this));
 
-        uint256 usdAmountForGale = amountBusd.mul(25).div(30);
+        // 47.5 in 52.5 go to gale
+        uint256 usdAmountForGale = amountBusd.mul(4750000).div(5250000);
+
+        uint256 GaleBefore = IERC20(GALE).balanceOf(address(this));
 
         ISnowBank(snowBank).invest(usdAmountForGale);
 
-        uint256 amountGale = IERC20(GALE).balanceOf(address (this));
-         if (amountGale > 0) {
+        uint256 amountGale = IERC20(GALE).balanceOf(address(this)).sub(GaleBefore);
+
+        if (amountGale > 0) {
             _notifyRewardAmount(amountGale,1);
         }
 
-        // Remaining 5% go to distribution
-        IERC20(BUSD).transfer(distributionBUSD, amountBusd.sub(usdAmountForGale));
+        // 3 in 52.5 go to blzdpool
+        uint256 usdBlizzardPool = amountBusd.mul(300000).div(5250000);
+
+        IERC20(BUSD).transfer(blizzardPool, usdBlizzardPool);
+
+         // 1.5 in 52.5 go to team
+        uint256 usdTeamYeti = amountBusd.mul(150000).div(5250000);
+
+        uint256 usdTeamYetiHalf = usdTeamYeti.div(2);
+
+        IERC20(BUSD).transfer(teamYetiA, usdTeamYetiHalf);
+
+        IERC20(BUSD).transfer(teamYetiB, usdTeamYeti.sub(usdTeamYetiHalf));
+
+        // remaining go to bot 0.5%
+        IERC20(BUSD).transfer(msg.sender,
+            amountBusd.sub(usdAmountForGale)
+            .sub(usdBlizzardPool)
+            .sub(usdTeamYeti)
+        );
+
+        // harvest xblzd 
+        uint256 xBlzdBefore = IERC20(xBLZD).balanceOf(address(this));
+
+        yetiMaster.deposit(pidYeti, 0);
+
+        uint256 amountxBlzd = IERC20(xBLZD).balanceOf(address(this)).sub(xBlzdBefore);
+
+        if (amountxBlzd > 0) {
+            _notifyRewardAmount(amountxBlzd,2);
+        }
 
         emit Harvested(cakeAmount);
     }
 
     function _notifyRewardAmount(uint256 reward,uint256 rewardId) internal updateReward(address(0),rewardId) {
-        require(rewardId <= 1 ,"wrong rewardId");
+        require(rewardId <= 2 ,"wrong reward id");
         if (block.timestamp >= periodFinish[rewardId]) {
             rewardRate[rewardId] = reward.div(rewardsDuration[rewardId]);
         } else {
@@ -239,11 +320,13 @@ contract SnowBankVault is IStakingRewards, Ownable , ReentrancyGuard {
     function addRewardsDistribution(address _distributor) public onlyOwner
     {
         rewardsDistributions[_distributor] = true;
+        emit AddRewardsDistribution(_distributor);
     }
 
     function removeRewardsDistribution(address _distributor) public onlyOwner
     {
         rewardsDistributions[_distributor] = false;
+        emit RemoveRewardsDistribution(_distributor);
     }
 
     function setRewardsDuration(uint256 _rewardsDuration,uint256 rewardId) external onlyOwner {
@@ -252,6 +335,11 @@ contract SnowBankVault is IStakingRewards, Ownable , ReentrancyGuard {
         emit RewardsDurationUpdated(rewardsDuration[rewardId],rewardId);
     }
 
+    function panic() public onlyOwner {
+        emergencyStop = true;
+        CAKE_MASTER_CHEF.emergencyWithdraw(pid);
+        emit EmergencyWithdrawLp(emergencyStop);
+    }
 
     /* ========== MODIFIERS ========== */
 
@@ -270,13 +358,22 @@ contract SnowBankVault is IStakingRewards, Ownable , ReentrancyGuard {
         _;
     }
 
+    modifier isNotEmergencyStop() {
+        require(!emergencyStop , "Emergency Stop");
+        _;
+    }
+
     /* ========== EVENTS ========== */
 
     event RewardAdded(uint256 reward,uint256 rewardId);
     event Staked(address indexed user, uint256 amount);
     event Withdrawn(address indexed user, uint256 amount);
+    event EmergencyWithdraw(address indexed user, uint256 amount);
     event RewardPaid(address indexed user, uint256 reward ,uint256 rewardId);
     event Harvested(uint256 amount);
     event RewardsDurationUpdated(uint256 newDuration,uint256 rewardId);
+    event AddRewardsDistribution(address indexed distributor);
+    event RemoveRewardsDistribution(address indexed distributor);
+    event EmergencyWithdrawLp(bool _emergencyStop);
 
 }
