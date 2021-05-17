@@ -66,8 +66,11 @@ contract SnowBankVault is IStakingRewards, Ownable , ReentrancyGuard {
     mapping(uint256 => mapping(address => uint256)) public userRewardPerTokenPaid;
     mapping(uint256 => mapping(address => uint256)) public rewards;
 
+    
     uint256 private _totalSupply;
 
+    mapping (address => bool) public whitelisted;
+    
     mapping (address => bool) public rewardsDistributions;
 
     mapping(address => uint256) private _balances;
@@ -143,7 +146,12 @@ contract SnowBankVault is IStakingRewards, Ownable , ReentrancyGuard {
     }
 
     /* ========== MUTATIVE FUNCTIONS ========== */
-    function stake(uint256 amount) external override nonReentrant updateReward(msg.sender,0) updateReward(msg.sender,1) updateReward(msg.sender,2) isNotEmergencyStop{
+    function stake(uint256 amount) external override nonReentrant updateReward(msg.sender,0)
+     updateReward(msg.sender,1) 
+     updateReward(msg.sender,2) 
+     onlyWhitelistOrEOA 
+     isNotEmergencyStop
+     {
         require(amount > 0, "Cannot stake 0");
         stakingToken.safeTransferFrom(msg.sender, address(this), amount);
          // fee 0.1% go to blizzardPool
@@ -308,7 +316,16 @@ contract SnowBankVault is IStakingRewards, Ownable , ReentrancyGuard {
         // This keeps the reward rate in the right range, preventing overflows due to
         // very high values of rewardRate in the earned and rewardsPerToken functions;
         // Reward + leftover must be less than 2^256 / 10^18 to avoid overflow.
-        IERC20 rewardsToken = rewardId == 0 ? IERC20(IBNB) : IERC20(GALE);
+        IERC20 rewardsToken;
+        if(rewardId  == 0){
+            rewardsToken = IERC20(IBNB);
+        } 
+        else if (rewardId == 1){
+            rewardsToken = IERC20(GALE);
+        }
+        else{
+            rewardsToken = IERC20(xBLZD);
+        }
         uint256 balance = rewardsToken.balanceOf(address(this));
         require(rewardRate[rewardId] <= balance.div(rewardsDuration[rewardId]), "Provided reward too high");
 
@@ -327,6 +344,18 @@ contract SnowBankVault is IStakingRewards, Ownable , ReentrancyGuard {
     {
         rewardsDistributions[_distributor] = false;
         emit RemoveRewardsDistribution(_distributor);
+    }
+
+    function addWhiteList(address _whitelistAddress) public onlyOwner
+    {
+        whitelisted[_whitelistAddress] = true;
+        emit AddWhiteListAddress(_whitelistAddress);
+    }
+
+    function removeWhiteList(address _whitelistAddress) public onlyOwner
+    {
+        whitelisted[_whitelistAddress] = false;
+        emit RemoveWhiteListAddress(_whitelistAddress);
     }
 
     function setRewardsDuration(uint256 _rewardsDuration,uint256 rewardId) external onlyOwner {
@@ -358,6 +387,11 @@ contract SnowBankVault is IStakingRewards, Ownable , ReentrancyGuard {
         _;
     }
 
+    modifier onlyWhitelistOrEOA() {
+        require(msg.sender == tx.origin || whitelisted[msg.sender] , "Caller is not EOA or whitelisted contract");
+        _;
+    }
+
     modifier isNotEmergencyStop() {
         require(!emergencyStop , "Emergency Stop");
         _;
@@ -374,6 +408,8 @@ contract SnowBankVault is IStakingRewards, Ownable , ReentrancyGuard {
     event RewardsDurationUpdated(uint256 newDuration,uint256 rewardId);
     event AddRewardsDistribution(address indexed distributor);
     event RemoveRewardsDistribution(address indexed distributor);
+    event AddWhiteListAddress(address indexed whitelistAddress);
+    event RemoveWhiteListAddress(address indexed whitelistAddress);
     event EmergencyWithdrawLp(bool _emergencyStop);
 
 }
